@@ -42,6 +42,13 @@ export interface FolderMetadata {
     updatedAt: Time;
     parentId?: string;
 }
+export interface ApiKey {
+    id: string;
+    token: string;
+    ownerId: Principal;
+    createdAt: Time;
+    description: string;
+}
 export interface AdminInfo {
     principal: Principal;
     username: string;
@@ -60,6 +67,9 @@ export interface UserProfile {
     name: string;
 }
 export interface StorageStats {
+    totalFiles: bigint;
+    totalFolders: bigint;
+    totalEncryptedFiles: bigint;
     frontendCanisterId: string;
     appVersion: string;
     totalStorageBytes: bigint;
@@ -76,11 +86,13 @@ export enum UserRole {
     guest = "guest"
 }
 export interface backendInterface {
-    addFile(id: string, name: string, size: bigint, parentId: string | null, blob: ExternalBlob): Promise<void>;
+    addFile(id: string, name: string, size: bigint, parentId: string | null, blob: ExternalBlob, isEncrypted: boolean): Promise<void>;
     assignCallerUserRole(user: Principal, role: UserRole): Promise<void>;
     createFolder(name: string, parentId: string | null): Promise<string>;
+    deleteApiKey(id: string): Promise<boolean>;
     deleteFile(id: string): Promise<boolean>;
     deleteFolder(id: string): Promise<boolean>;
+    generateApiKey(description: string): Promise<string>;
     getAllFolders(): Promise<Array<FolderMetadata>>;
     getCallerUserProfile(): Promise<UserProfile | null>;
     getFile(id: string): Promise<FileMetadata | null>;
@@ -91,10 +103,32 @@ export interface backendInterface {
     getStorageStats(): Promise<StorageStats>;
     getUserProfile(user: Principal): Promise<UserProfile | null>;
     getUserRole(): Promise<UserRole>;
+    http_request(req: {
+        url: string;
+        method: string;
+        body: Uint8Array;
+        headers: Array<[string, string]>;
+    }): Promise<{
+        body: Uint8Array;
+        headers: Array<[string, string]>;
+        upgrade?: boolean;
+        status_code: number;
+    }>;
+    http_request_update(req: {
+        url: string;
+        method: string;
+        body: Uint8Array;
+        headers: Array<[string, string]>;
+    }): Promise<{
+        body: Uint8Array;
+        headers: Array<[string, string]>;
+        status_code: number;
+    }>;
     initializeAccessControl(): Promise<void>;
     isCallerAdmin(): Promise<boolean>;
     isCallerApproved(): Promise<boolean>;
     isUsernameUnique(username: string): Promise<boolean>;
+    listApiKeys(): Promise<Array<ApiKey>>;
     listApprovals(): Promise<Array<UserApprovalInfo>>;
     moveItem(itemId: string, newParentId: string | null, isFolder: boolean): Promise<void>;
     moveItems(moves: Array<FileMove>): Promise<void>;

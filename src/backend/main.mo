@@ -4,18 +4,18 @@ import AccessControl "authorization/access-control";
 import UserApproval "user-approval/approval";
 import List "mo:core/List";
 import Map "mo:core/Map";
-import Iter "mo:core/Iter";
 import Nat "mo:core/Nat";
+import Int "mo:core/Int";
 import Principal "mo:core/Principal";
 import Runtime "mo:core/Runtime";
 import Text "mo:core/Text";
-import Char "mo:core/Char";
 import Time "mo:core/Time";
+import Blob "mo:core/Blob";
 
 
 // Apply migration on upgrade (ensures persistent change of appVersion, not needed for empty file handling)
 
-actor {
+actor self {
   let storage = Storage.new();
   include MixinStorage(storage);
 
@@ -26,10 +26,17 @@ actor {
   var frontendCanisterId : Text = "";
   var backendCanisterId : Text = "";
   var firstAdmin : ?Principal = null;
-  var appVersion = "0.4.109";
+  var appVersion = "0.6.195";
   var nextFolderId = 1;
+  var nextApiKeyId = 1;
   let files = Map.empty<Text, FileMetadata>();
   let folders = Map.empty<Text, FolderMetadata>();
+  let apiKeys = Map.empty<Text, ApiKey>();
+  // Separate map tracking which file IDs are encrypted (avoids stable type migration)
+  let encryptedFiles = Map.empty<Text, Bool>();
+  // Separate map storing raw bytes for CLI-uploaded files (keyed by fileId)
+  // IMPORTANT: CLI files use "!cli!<fileId>" as blob sentinel in FileMetadata
+  let cliFileBytes = Map.empty<Text, Blob>();
 
   public type UserProfile = {
     name : Text;
@@ -53,6 +60,14 @@ actor {
     updatedAt : Time.Time;
   };
 
+  public type ApiKey = {
+    id : Text;
+    token : Text;
+    description : Text;
+    ownerId : Principal;
+    createdAt : Time.Time;
+  };
+
   public type AdminInfo = {
     principal : Principal;
     username : Text;
@@ -61,6 +76,9 @@ actor {
 
   public type StorageStats = {
     totalStorageBytes : Nat;
+    totalFolders : Nat;
+    totalFiles : Nat;
+    totalEncryptedFiles : Nat;
     backendCanisterId : Text;
     frontendCanisterId : Text;
     appVersion : Text;
@@ -89,6 +107,271 @@ actor {
     isFolder : Bool;
   };
 
+  // Simple pseudo-random token generator using time + counter
+  var tokenCounter : Nat = 0;
+  func generateToken() : Text {
+    tokenCounter += 1;
+    let seed = Int.abs(Time.now()) + tokenCounter * 1_000_003;
+    let hex = "0123456789abcdef";
+    var result = "fget_";
+    var n = seed;
+    var i = 0;
+    while (i < 32) {
+      let idx = n % 16;
+      result #= Text.fromChar(hex.chars().toArray()[idx]);
+      n := n / 16 + idx * 7_919 + tokenCounter * 31;
+      i += 1;
+    };
+    result;
+  };
+
+  // Validate API token and return owning principal if valid
+  func validateApiToken(token : Text) : ?Principal {
+    for ((_, key) in apiKeys.entries()) {
+      if (key.token == token) {
+        return ?key.ownerId;
+      };
+    };
+    null;
+  };
+
+  // Resolve or create nested folder path like "aaa/bbb/ccc" and return the leaf folder ID
+  func resolveOrCreateFolderPath(path : Text) : Text {
+    // Split path on "/"
+    let segments = path.split(#char '/');
+    var currentParentId : ?Text = null;
+
+    for (segment in segments) {
+      let trimmed = segment.trim(#text " ");
+      if (trimmed != "") {
+        // Look for existing folder with this name under currentParentId
+        var found : ?Text = null;
+        for ((_, folder) in folders.entries()) {
+          if (folder.name == trimmed and folder.parentId == currentParentId) {
+            found := ?folder.id;
+          };
+        };
+        let folderId = switch (found) {
+          case (?id) { id };
+          case (null) {
+            // Create new folder at this level
+            let newId = "folder_" # Int.abs(Time.now()).toText() # "_" # tokenCounter.toText();
+            tokenCounter += 1;
+            let now = Time.now();
+            let newFolder : FolderMetadata = {
+              id = newId;
+              name = trimmed;
+              parentId = currentParentId;
+              createdAt = now;
+              updatedAt = now;
+            };
+            folders.add(newId, newFolder);
+            newId;
+          };
+        };
+        currentParentId := ?folderId;
+      };
+    };
+
+    // Return the leaf folder id (currentParentId must be ?Text at this point)
+    switch (currentParentId) {
+      case (?id) { id };
+      case (null) { Runtime.trap("Empty folder path") };
+    };
+  };
+
+  // HTTP interface for curl/wget uploads
+  public query func http_request(req : { method : Text; url : Text; headers : [(Text, Text)]; body : Blob }) : async {
+    status_code : Nat16;
+    headers : [(Text, Text)];
+    body : Blob;
+    upgrade : ?Bool;
+  } {
+    if (req.method == "POST") {
+      // Upgrade to update call for POST requests
+      {
+        status_code = 204;
+        headers = [];
+        body = "".encodeUtf8();
+        upgrade = ?true;
+      };
+    } else if (req.method == "GET") {
+      // Serve CLI-uploaded files via GET /file/<id>
+      // URL format: /file/<fileId>
+      // NOTE: This endpoint is intentionally public (no auth check) because it's accessed via
+      // raw.icp0.io URLs that are meant to be shareable download links.
+      // The security model relies on file IDs being unguessable (generated with timestamp + counter).
+      let url = req.url;
+      let prefix = "/file/";
+      if (url.startsWith(#text prefix)) {
+        let fileId = url.trimStart(#text prefix);
+        // Strip query string if present
+        let cleanId = switch (fileId.split(#char '?').next()) {
+          case (?id) { id };
+          case (null) { fileId };
+        };
+        // Serve raw bytes for CLI-uploaded files from cliFileBytes map
+        switch (files.get(cleanId)) {
+          case (null) {
+            {
+              status_code = 404;
+              headers = [("Content-Type", "text/plain")];
+              body = "File not found".encodeUtf8();
+              upgrade = null;
+            };
+          };
+          case (?file) {
+            switch (cliFileBytes.get(cleanId)) {
+              case (null) {
+                {
+                  status_code = 404;
+                  headers = [("Content-Type", "text/plain")];
+                  body = "File bytes not found".encodeUtf8();
+                  upgrade = null;
+                };
+              };
+              case (?bytes) {
+                {
+                  status_code = 200;
+                  headers = [
+                    ("Content-Type", "application/octet-stream"),
+                    ("Content-Disposition", "attachment; filename=\"" # file.name # "\""),
+                    ("Content-Length", file.size.toText()),
+                  ];
+                  body = bytes;
+                  upgrade = null;
+                };
+              };
+            };
+          };
+        };
+      } else {
+        {
+          status_code = 404;
+          headers = [("Content-Type", "text/plain")];
+          body = "Not Found".encodeUtf8();
+          upgrade = null;
+        };
+      };
+    } else {
+      {
+        status_code = 405;
+        headers = [("Content-Type", "text/plain")];
+        body = "Method Not Allowed".encodeUtf8();
+        upgrade = null;
+      };
+    };
+  };
+
+  public func http_request_update(req : { method : Text; url : Text; headers : [(Text, Text)]; body : Blob }) : async {
+    status_code : Nat16;
+    headers : [(Text, Text)];
+    body : Blob;
+  } {
+    if (req.method != "POST") {
+      return {
+        status_code = 405;
+        headers = [("Content-Type", "text/plain")];
+        body = "Method Not Allowed".encodeUtf8();
+      };
+    };
+
+    // Extract API token from headers
+    var apiToken : ?Text = null;
+    var filename : ?Text = null;
+    var folderPath : ?Text = null;
+
+    for ((name, value) in req.headers.vals()) {
+      let lower = name.toLower();
+      if (lower == "x-api-token") { apiToken := ?value };
+      if (lower == "x-filename") { filename := ?value };
+      if (lower == "x-folder") { folderPath := ?value };
+    };
+
+    // Validate token
+    let callerPrincipal = switch (apiToken) {
+      case (null) {
+        return {
+          status_code = 401;
+          headers = [("Content-Type", "text/plain")];
+          body = "Unauthorized: Missing X-API-Token header".encodeUtf8();
+        };
+      };
+      case (?token) {
+        switch (validateApiToken(token)) {
+          case (null) {
+            return {
+              status_code = 401;
+              headers = [("Content-Type", "text/plain")];
+              body = "Unauthorized: Invalid API token".encodeUtf8();
+            };
+          };
+          case (?principal) { principal };
+        };
+      };
+    };
+
+    // Check caller is approved (must have user or admin role, not guest)
+    if (not AccessControl.hasPermission(accessControlState, callerPrincipal, #user)) {
+      return {
+        status_code = 403;
+        headers = [("Content-Type", "text/plain")];
+        body = "Forbidden: Account not approved".encodeUtf8();
+      };
+    };
+
+    // Get filename
+    let fname = switch (filename) {
+      case (null) { "upload" };
+      case (?n) { n };
+    };
+
+    // Resolve folder ID from path — handles nested paths like "aaa/bbb/ccc"
+    let parentFolderId : ?Text = switch (folderPath) {
+      case (null) { null };
+      case (?path) {
+        let trimmedPath = path.trim(#text " ");
+        if (trimmedPath == "") {
+          null;
+        } else {
+          ?resolveOrCreateFolderPath(trimmedPath);
+        };
+      };
+    };
+
+    // Store file with !cli!<fileId> sentinel so frontend can build a stable public URL
+    // IMPORTANT: raw bytes go in cliFileBytes map; blob field stores only the sentinel string
+    let fileSize = req.body.size();
+    let fileId = "api_" # Int.abs(Time.now()).toText() # "_" # tokenCounter.toText();
+    tokenCounter += 1;
+
+    // Store raw bytes separately keyed by fileId
+    cliFileBytes.add(fileId, req.body);
+
+    let now = Time.now();
+    let metadata : FileMetadata = {
+      id = fileId;
+      name = fname;
+      size = fileSize;
+      // !cli!<fileId> sentinel — frontend detects this and builds the stable icp0.io URL
+      // DO NOT change this to store raw bytes — it breaks the frontend downloadFile logic
+      blob = ("!cli!" # fileId).encodeUtf8();
+      parentId = parentFolderId;
+      createdAt = now;
+      updatedAt = now;
+    };
+    files.add(fileId, metadata);
+    // CLI uploads are never encrypted
+
+    let selfCanisterId = Principal.fromActor(self).toText();
+    let downloadUrl = "https://" # selfCanisterId # ".raw.icp0.io/file/" # fileId;
+    {
+      status_code = 200;
+      headers = [("Content-Type", "application/json")];
+      body = ("{\"id\":\"" # fileId # "\",\"name\":\"" # fname # "\",\"size\":" # fileSize.toText() # ",\"url\":\"" # downloadUrl # "\"}").encodeUtf8();
+    };
+  };
+
   public shared ({ caller }) func initializeAccessControl() : async () {
     AccessControl.initialize(accessControlState, caller);
     switch (firstAdmin) {
@@ -107,22 +390,22 @@ actor {
   };
 
   public shared ({ caller }) func setApproval(user : Principal, status : UserApproval.ApprovalStatus) : async () {
-    if (getEffectiveRole(caller) != #admin) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #admin)) {
       Runtime.trap("Unauthorized: Only admins can perform this action");
     };
     UserApproval.setApproval(approvalState, user, status);
   };
 
   public query ({ caller }) func listApprovals() : async [UserApproval.UserApprovalInfo] {
-    if (getEffectiveRole(caller) != #admin) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #admin)) {
       Runtime.trap("Unauthorized: Only admins can perform this action");
     };
     UserApproval.listApprovals(approvalState);
   };
 
   public shared ({ caller }) func assignCallerUserRole(user : Principal, role : AccessControl.UserRole) : async () {
-    if (getEffectiveRole(caller) != #admin) {
-      Runtime.trap("Access denied: Only admins can set roles");
+    if (not AccessControl.hasPermission(accessControlState, caller, #admin)) {
+      Runtime.trap("Unauthorized: Only admins can perform this action");
     };
 
     // Set approval status to approved when assigning a role
@@ -141,36 +424,36 @@ actor {
   };
 
   public shared ({ caller }) func setFrontendCanisterId(canisterId : Text) : async () {
-    if (getEffectiveRole(caller) != #admin) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #admin)) {
       Runtime.trap("Unauthorized: Only admins can set frontend canister ID");
     };
     frontendCanisterId := canisterId;
   };
 
   public shared ({ caller }) func setBackendCanisterId(canisterId : Text) : async () {
-    if (getEffectiveRole(caller) != #admin) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #admin)) {
       Runtime.trap("Unauthorized: Only admins can set backend canister ID");
     };
     backendCanisterId := canisterId;
   };
 
   public query ({ caller }) func getCallerUserProfile() : async ?UserProfile {
-    if (getEffectiveRole(caller) == #guest) {
-      Runtime.trap("Unauthorized: Only existing users can view profiles");
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
+      Runtime.trap("Unauthorized: Only users can view profiles");
     };
     userProfiles.get(caller);
   };
 
   public query ({ caller }) func getUserProfile(user : Principal) : async ?UserProfile {
-    if (caller != user and getEffectiveRole(caller) != #admin) {
+    if (caller != user and not AccessControl.isAdmin(accessControlState, caller)) {
       Runtime.trap("Unauthorized: Can only view your own profile");
     };
     userProfiles.get(user);
   };
 
   public shared ({ caller }) func saveCallerUserProfile(profile : UserProfile) : async () {
-    if (getEffectiveRole(caller) == #guest) {
-      Runtime.trap("Unauthorized: Only existing users can save profiles");
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
+      Runtime.trap("Unauthorized: Only users can save profiles");
     };
 
     let trimmedName = profile.name.trim(#text " ");
@@ -188,8 +471,8 @@ actor {
   };
 
   public query ({ caller }) func isUsernameUnique(username : Text) : async Bool {
-    if (getEffectiveRole(caller) == #guest) {
-      Runtime.trap("Unauthorized: Only existing users can check username availability");
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
+      Runtime.trap("Unauthorized: Only users can check username availability");
     };
 
     let trimmedName = username.trim(#text " ");
@@ -202,14 +485,20 @@ actor {
   };
 
   public query ({ caller }) func getStorageStats() : async StorageStats {
-    if (getEffectiveRole(caller) != #admin) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #admin)) {
       Runtime.trap("Unauthorized: Only admins can view storage statistics");
     };
 
     let totalSize = files.values().foldLeft(0, func(acc, file) { acc + file.size });
 
+    // Count encrypted files from the dedicated tracking map
+    let encryptedCount = encryptedFiles.size();
+
     {
       totalStorageBytes = totalSize;
+      totalFolders = folders.size();
+      totalFiles = files.size();
+      totalEncryptedFiles = encryptedCount;
       backendCanisterId;
       frontendCanisterId;
       appVersion;
@@ -217,7 +506,7 @@ actor {
   };
 
   public query ({ caller }) func getMembers() : async [AdminInfo] {
-    if (getEffectiveRole(caller) != #admin) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #admin)) {
       Runtime.trap("Unauthorized: Only admins can view members");
     };
 
@@ -304,7 +593,7 @@ actor {
   };
 
   public shared ({ caller }) func removeMember(principal : Principal) : async () {
-    if (getEffectiveRole(caller) != #admin) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #admin)) {
       Runtime.trap("Unauthorized: Only admins can remove members");
     };
 
@@ -329,8 +618,65 @@ actor {
     AccessControl.assignRole(accessControlState, caller, principal, #guest);
   };
 
-  public shared ({ caller }) func addFile(id : Text, name : Text, size : Nat, parentId : ?Text, blob : Storage.ExternalBlob) : async () {
-    if (getEffectiveRole(caller) == #guest) {
+  // API Key Management
+  public shared ({ caller }) func generateApiKey(description : Text) : async Text {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
+      Runtime.trap("Unauthorized: Only approved users can generate API keys");
+    };
+
+    let keyId = "key_" # nextApiKeyId.toText();
+    nextApiKeyId += 1;
+
+    let token = generateToken();
+    let now = Time.now();
+
+    let key : ApiKey = {
+      id = keyId;
+      token;
+      description;
+      ownerId = caller;
+      createdAt = now;
+    };
+
+    apiKeys.add(keyId, key);
+    token;
+  };
+
+  public shared ({ caller }) func deleteApiKey(id : Text) : async Bool {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
+      Runtime.trap("Unauthorized: Only approved users can delete API keys");
+    };
+
+    switch (apiKeys.get(id)) {
+      case (null) { false };
+      case (?key) {
+        // Only owner or admin can delete
+        if (key.ownerId != caller and not AccessControl.isAdmin(accessControlState, caller)) {
+          Runtime.trap("Unauthorized: Can only delete your own API keys");
+        };
+        apiKeys.remove(id);
+        true;
+      };
+    };
+  };
+
+  public query ({ caller }) func listApiKeys() : async [ApiKey] {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
+      Runtime.trap("Unauthorized: Only approved users can list API keys");
+    };
+
+    let result = List.empty<ApiKey>();
+    for ((_, key) in apiKeys.entries()) {
+      // Admin sees all keys; users see only their own
+      if (AccessControl.isAdmin(accessControlState, caller) or key.ownerId == caller) {
+        result.add(key);
+      };
+    };
+    result.toArray();
+  };
+
+  public shared ({ caller }) func addFile(id : Text, name : Text, size : Nat, parentId : ?Text, blob : Storage.ExternalBlob, isEncrypted : Bool) : async () {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only admins and approved users can add files");
     };
 
@@ -345,24 +691,25 @@ actor {
       updatedAt = now;
     };
     files.add(id, metadata);
+    if (isEncrypted) { encryptedFiles.add(id, true) };
   };
 
   public query ({ caller }) func getFiles() : async [FileMetadata] {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can view files");
     };
     files.values().toArray();
   };
 
   public query ({ caller }) func getFile(id : Text) : async ?FileMetadata {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can view files");
     };
     files.get(id);
   };
 
   public shared ({ caller }) func deleteFile(id : Text) : async Bool {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can delete files");
     };
 
@@ -370,6 +717,7 @@ actor {
       case (null) { false };
       case (?_) {
         files.remove(id);
+        encryptedFiles.remove(id);
         true;
       };
     };
@@ -456,7 +804,7 @@ actor {
   };
 
   public query ({ caller }) func searchFoldersInSubtree(searchTerm : Text, startFolderId : ?Text) : async FolderSearchResults {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can search folders");
     };
 
@@ -470,7 +818,7 @@ actor {
   };
 
   public query ({ caller }) func searchFiles(searchTerm : Text) : async [FileMetadata] {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can search files");
     };
 
@@ -483,7 +831,7 @@ actor {
   };
 
   public query ({ caller }) func searchSubtree(searchTerm : Text, startFolderId : ?Text) : async [FileSystemItem] {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can search folders");
     };
 
@@ -532,7 +880,7 @@ actor {
   };
 
   public shared ({ caller }) func createFolder(name : Text, parentId : ?Text) : async Text {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can create folders");
     };
 
@@ -553,7 +901,7 @@ actor {
   };
 
   public shared ({ caller }) func deleteFolder(id : Text) : async Bool {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can delete folders");
     };
 
@@ -587,12 +935,13 @@ actor {
     };
     for (fileId in fileIdsToRemove.toArray().vals()) {
       files.remove(fileId);
+      encryptedFiles.remove(fileId);
     };
     folders.remove(folderId);
   };
 
   public query ({ caller }) func getFolderContents(folderId : ?Text) : async [FileSystemItem] {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can view folder contents");
     };
 
@@ -614,7 +963,7 @@ actor {
   };
 
   public shared ({ caller }) func moveItem(itemId : Text, newParentId : ?Text, isFolder : Bool) : async () {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can move items");
     };
 
@@ -647,7 +996,7 @@ actor {
   };
 
   public shared ({ caller }) func moveItems(moves : [FileMove]) : async () {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can move items");
     };
 
@@ -702,14 +1051,14 @@ actor {
   };
 
   public query ({ caller }) func getFolder(id : Text) : async ?FolderMetadata {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can view folders");
     };
     folders.get(id);
   };
 
   public query ({ caller }) func getAllFolders() : async [FolderMetadata] {
-    if (getEffectiveRole(caller) == #guest) {
+    if (not AccessControl.hasPermission(accessControlState, caller, #user)) {
       Runtime.trap("Unauthorized: Only existing users can view folders");
     };
     folders.values().toArray();

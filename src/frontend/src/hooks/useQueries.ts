@@ -11,6 +11,15 @@ import type {
   UserProfile,
   UserRole,
 } from "../backend";
+
+// ApiKey type mirrors backend.d.ts declaration
+export interface ApiKey {
+  id: string;
+  token: string;
+  description: string;
+  ownerId: import("@icp-sdk/core/principal").Principal;
+  createdAt: bigint;
+}
 import { containsNormalized } from "../lib/searchNormalize";
 import { buildSubtreeFolderIds } from "../lib/subtreeIndex";
 import { useActor } from "./useActor";
@@ -250,15 +259,17 @@ export function useAddFile() {
       size,
       blob,
       parentId,
+      isEncrypted,
     }: {
       id: string;
       name: string;
       size: bigint;
       blob: ExternalBlob;
       parentId: string | null;
+      isEncrypted: boolean;
     }) => {
       if (!actor) throw new Error("Actor not available");
-      return actor.addFile(id, name, size, parentId, blob);
+      return actor.addFile(id, name, size, parentId, blob, isEncrypted);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["files"] });
@@ -393,6 +404,7 @@ export function useCreateFolder() {
       queryClient.invalidateQueries({ queryKey: ["folderContents"] });
       queryClient.invalidateQueries({ queryKey: ["folders"] });
       queryClient.invalidateQueries({ queryKey: ["subtreeSearch"] });
+      queryClient.invalidateQueries({ queryKey: ["storageStats"] });
     },
   });
 }
@@ -410,6 +422,7 @@ export function useDeleteFolder() {
       queryClient.invalidateQueries({ queryKey: ["folderContents"] });
       queryClient.invalidateQueries({ queryKey: ["folders"] });
       queryClient.invalidateQueries({ queryKey: ["subtreeSearch"] });
+      queryClient.invalidateQueries({ queryKey: ["storageStats"] });
     },
   });
 }
@@ -462,6 +475,7 @@ export function useMoveItem() {
       queryClient.invalidateQueries({ queryKey: ["folders"] });
       queryClient.invalidateQueries({ queryKey: ["files"] });
       queryClient.invalidateQueries({ queryKey: ["subtreeSearch"] });
+      queryClient.invalidateQueries({ queryKey: ["storageStats"] });
     },
   });
 }
@@ -480,6 +494,56 @@ export function useMoveItems() {
       queryClient.invalidateQueries({ queryKey: ["folders"] });
       queryClient.invalidateQueries({ queryKey: ["files"] });
       queryClient.invalidateQueries({ queryKey: ["subtreeSearch"] });
+      queryClient.invalidateQueries({ queryKey: ["storageStats"] });
+    },
+  });
+}
+
+// API Key Management Hooks
+
+export function useListApiKeys() {
+  const { actor, isFetching: actorFetching } = useActor();
+  const { data: userRole } = useGetCallerUserRole();
+
+  const isAdmin = userRole === "admin";
+
+  return useQuery<ApiKey[]>({
+    queryKey: ["apiKeys"],
+    queryFn: async () => {
+      if (!actor) return [];
+      return (actor as any).listApiKeys();
+    },
+    enabled: !!actor && !actorFetching && isAdmin,
+    retry: false,
+  });
+}
+
+export function useGenerateApiKey() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (description: string) => {
+      if (!actor) throw new Error("Actor not available");
+      return (actor as any).generateApiKey(description);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["apiKeys"] });
+    },
+  });
+}
+
+export function useDeleteApiKey() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (id: string) => {
+      if (!actor) throw new Error("Actor not available");
+      return (actor as any).deleteApiKey(id);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["apiKeys"] });
     },
   });
 }

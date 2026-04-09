@@ -15,6 +15,7 @@ export interface UploadCallbacks {
     size: bigint;
     blob: ExternalBlob;
     parentId: string | null;
+    isEncrypted: boolean;
   }) => Promise<void>;
   onProgress?: (current: number, total: number, fileName: string) => void;
   onSkipEmptyFile?: (fileName: string) => void;
@@ -185,6 +186,7 @@ export async function uploadFolderRecursively(
       size: BigInt(uint8Array.length),
       blob,
       parentId,
+      isEncrypted: !!callbacks.encryptFile,
     });
 
     // Notify caller of uploaded file ID (for tracking encrypted files etc.)

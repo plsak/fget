@@ -64,6 +64,7 @@ export function FilePreviewModal({
   const [overrideMime, setOverrideMime] = useState<string | null>(null);
   const [showDecryptPrompt, setShowDecryptPrompt] = useState(false);
   const [decryptPassword, setDecryptPassword] = useState("");
+  const [decryptError, setDecryptError] = useState<string | null>(null);
   const [pendingEncryptedBytes, setPendingEncryptedBytes] =
     useState<Uint8Array | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
@@ -88,6 +89,7 @@ export function FilePreviewModal({
       setError(null);
       setShowDecryptPrompt(false);
       setDecryptPassword("");
+      setDecryptError(null);
       setPendingEncryptedBytes(null);
       return;
     }
@@ -97,6 +99,7 @@ export function FilePreviewModal({
       setError(null);
       setOverrideMime(null);
       setShowDecryptPrompt(false);
+      setDecryptError(null);
       setPendingEncryptedBytes(null);
 
       try {
@@ -251,14 +254,17 @@ export function FilePreviewModal({
   const handlePreviewDecrypt = async () => {
     if (!pendingEncryptedBytes || !decryptPassword) return;
     setIsDecrypting(true);
+    setDecryptError(null);
     try {
       const decrypted = await decryptBytes(
         pendingEncryptedBytes,
         decryptPassword,
       );
+      // Decryption succeeded — close the prompt and render the content
       setShowDecryptPrompt(false);
       setPendingEncryptedBytes(null);
       setDecryptPassword("");
+      setDecryptError(null);
       setIsLoading(true);
       const ext = getFileExtension(file?.name ?? "");
       const mime =
@@ -286,7 +292,10 @@ export function FilePreviewModal({
       }
       setIsLoading(false);
     } catch {
-      toast.error("Decryption failed. Check your password.");
+      // Wrong password — stay on the decrypt prompt, show inline error
+      // Do NOT close the prompt or show the download fallback
+      setDecryptError("Incorrect password. Please try again.");
+      setDecryptPassword("");
     } finally {
       setIsDecrypting(false);
     }
@@ -329,6 +338,9 @@ export function FilePreviewModal({
     if (!isOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Do not intercept any keys while the decrypt prompt is showing —
+      // typing the password would otherwise trigger shortcuts like D=download
+      if (showDecryptPrompt) return;
       if (e.key === "ArrowLeft") handlePrevious();
       else if (e.key === "ArrowRight") handleNext();
       else if (e.key === "Escape") onClose();
@@ -338,7 +350,14 @@ export function FilePreviewModal({
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, handlePrevious, handleNext, onClose, toggleFullscreen]);
+  }, [
+    isOpen,
+    showDecryptPrompt,
+    handlePrevious,
+    handleNext,
+    onClose,
+    toggleFullscreen,
+  ]);
 
   const getFileIcon = (fileName: string) => {
     const ext = getFileExtension(fileName);
@@ -542,7 +561,61 @@ export function FilePreviewModal({
                   </>
                 )}
 
-                {isLoading && (
+                {/* Decrypt prompt — rendered inside the preview area, above all other content */}
+                {showDecryptPrompt && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-background/90 backdrop-blur-sm z-20">
+                    <div className="bg-card border rounded-lg p-6 shadow-lg max-w-sm w-full mx-4 space-y-4">
+                      <div className="flex items-center gap-2">
+                        <Lock className="h-5 w-5 text-red-500" />
+                        <h3 className="font-semibold">Encrypted File</h3>
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        This file is encrypted. Enter the password to preview
+                        it.
+                      </p>
+                      <Input
+                        type="password"
+                        placeholder="Decryption password"
+                        value={decryptPassword}
+                        onChange={(e) => {
+                          setDecryptPassword(e.target.value);
+                          setDecryptError(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handlePreviewDecrypt();
+                        }}
+                        autoFocus
+                      />
+                      {decryptError && (
+                        <p className="text-sm text-red-500 flex items-center gap-1">
+                          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                          {decryptError}
+                        </p>
+                      )}
+                      <div className="flex gap-2 justify-end">
+                        <Button variant="outline" size="sm" onClick={onClose}>
+                          Cancel
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={handlePreviewDecrypt}
+                          disabled={!decryptPassword || isDecrypting}
+                        >
+                          {isDecrypting ? (
+                            <>
+                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                              Decrypting...
+                            </>
+                          ) : (
+                            "Decrypt & Preview"
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {isLoading && !showDecryptPrompt && (
                   <div className="flex flex-col items-center justify-center gap-3 p-4 sm:p-8">
                     <Loader2 className="h-6 w-6 sm:h-8 sm:w-8 animate-spin text-primary" />
                     <p className="text-xs sm:text-sm text-muted-foreground">
@@ -551,7 +624,7 @@ export function FilePreviewModal({
                   </div>
                 )}
 
-                {error && (
+                {error && !showDecryptPrompt && (
                   <div className="flex flex-col items-center justify-center gap-3 p-4 sm:p-8">
                     <AlertCircle className="h-6 w-6 sm:h-8 sm:w-8 text-muted-foreground" />
                     <p className="text-xs sm:text-sm text-muted-foreground text-center">
@@ -569,7 +642,7 @@ export function FilePreviewModal({
                   </div>
                 )}
 
-                {!isLoading && !error && (
+                {!isLoading && !error && !showDecryptPrompt && (
                   <div className="w-full h-full flex flex-col min-h-0">
                     {/* Image Preview with Zoom/Pan */}
                     {effectiveIsImage && blobUrl && (
@@ -639,49 +712,6 @@ export function FilePreviewModal({
               </div>
             </div>
           </div>
-          {/* Decrypt prompt overlay */}
-          {showDecryptPrompt && (
-            <div className="absolute inset-0 flex items-center justify-center bg-background/80 backdrop-blur-sm z-10 rounded-lg">
-              <div className="bg-card border rounded-lg p-6 shadow-lg max-w-sm w-full mx-4 space-y-4">
-                <div className="flex items-center gap-2">
-                  <Lock className="h-5 w-5 text-purple-500" />
-                  <h3 className="font-semibold">Encrypted File</h3>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  This file is encrypted. Enter the password to preview it.
-                </p>
-                <Input
-                  type="password"
-                  placeholder="Decryption password"
-                  value={decryptPassword}
-                  onChange={(e) => setDecryptPassword(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handlePreviewDecrypt();
-                  }}
-                  autoFocus
-                />
-                <div className="flex gap-2 justify-end">
-                  <Button variant="outline" size="sm" onClick={onClose}>
-                    Cancel
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={handlePreviewDecrypt}
-                    disabled={!decryptPassword || isDecrypting}
-                  >
-                    {isDecrypting ? (
-                      <>
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        Decrypting...
-                      </>
-                    ) : (
-                      "Decrypt & Preview"
-                    )}
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       </DialogPortal>
     </Dialog>

@@ -153,7 +153,14 @@ export async function createActorWithConfig(
     agent,
   );
 
+  // Sentinel prefix written by uploadFile into the canister blob field for GUI uploads.
   const MOTOKO_DEDUPLICATION_SENTINEL = "!caf!";
+
+  // Sentinel prefix written by the backend HTTP /upload handler for CLI uploads.
+  // CLI-uploaded files store raw bytes keyed by fileId in a separate map (cliFileBytes)
+  // and write "!cli!<fileId>" into the blob field instead of a blob-storage hash.
+  // DO NOT REMOVE THIS CONSTANT — it is required for the downloadFile sentinel check below.
+  const CLI_UPLOAD_SENTINEL = "!cli!";
 
   const uploadFile = async (file: ExternalBlob): Promise<Uint8Array> => {
     const { hash } = await storageClient.putFile(
@@ -163,11 +170,39 @@ export async function createActorWithConfig(
     return new TextEncoder().encode(MOTOKO_DEDUPLICATION_SENTINEL + hash);
   };
 
+  // =============================================================================
+  // CRITICAL: DO NOT SIMPLIFY OR REMOVE THE SENTINEL CHECKS IN THIS FUNCTION.
+  //
+  // The canister blob field contains different data depending on upload path:
+  //   1. GUI uploads:  bytes = TextEncoder("!caf!sha256:<64-hex>")  → fetch from blob storage
+  //   2. CLI uploads:  bytes = TextEncoder("!cli!<fileId>")         → fetch from raw.icp0.io
+  //   3. Legacy files: bytes = raw file bytes (no sentinel prefix)  → serve inline
+  //
+  // Without this check, CLI-uploaded raw bytes get passed as a storage hash to
+  // getDirectURL(), which throws "Invalid hash format" and breaks the entire file list.
+  //
+  // This bug has recurred many times because builds regenerate config.ts from a
+  // template and drop the fix. The fix MUST live in this source file.
+  // =============================================================================
   const downloadFile = async (bytes: Uint8Array): Promise<ExternalBlob> => {
-    const hashWithPrefix = new TextDecoder().decode(new Uint8Array(bytes));
-    const hash = hashWithPrefix.substring(MOTOKO_DEDUPLICATION_SENTINEL.length);
-    const url = await storageClient.getDirectURL(hash);
-    return ExternalBlob.fromURL(url);
+    const decoded = new TextDecoder().decode(new Uint8Array(bytes));
+
+    if (decoded.startsWith(MOTOKO_DEDUPLICATION_SENTINEL)) {
+      // GUI upload: extract sha256 hash and fetch from blob storage
+      const hash = decoded.substring(MOTOKO_DEDUPLICATION_SENTINEL.length);
+      const url = await storageClient.getDirectURL(hash);
+      return ExternalBlob.fromURL(url);
+    }
+
+    if (decoded.startsWith(CLI_UPLOAD_SENTINEL)) {
+      // CLI upload: construct stable raw.icp0.io URL using the fileId
+      const fileId = decoded.substring(CLI_UPLOAD_SENTINEL.length);
+      const url = `https://${config.backend_canister_id}.raw.icp0.io/file/${fileId}`;
+      return ExternalBlob.fromURL(url);
+    }
+
+    // Legacy fallback: raw bytes stored inline (pre-sentinel CLI uploads)
+    return ExternalBlob.fromBytes(new Uint8Array(bytes));
   };
 
   return createActor(

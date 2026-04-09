@@ -53,10 +53,20 @@ export const AdminInfo = IDL.Record({
   'role' : UserRole,
 });
 export const StorageStats = IDL.Record({
+  'totalFiles' : IDL.Nat,
+  'totalFolders' : IDL.Nat,
+  'totalEncryptedFiles' : IDL.Nat,
   'frontendCanisterId' : IDL.Text,
   'appVersion' : IDL.Text,
   'totalStorageBytes' : IDL.Nat,
   'backendCanisterId' : IDL.Text,
+});
+export const ApiKey = IDL.Record({
+  'id' : IDL.Text,
+  'token' : IDL.Text,
+  'ownerId' : IDL.Principal,
+  'createdAt' : Time,
+  'description' : IDL.Text,
 });
 export const ApprovalStatus = IDL.Variant({
   'pending' : IDL.Null,
@@ -105,14 +115,16 @@ export const idlService = IDL.Service({
     ),
   '_caffeineStorageUpdateGatewayPrincipals' : IDL.Func([], [], []),
   'addFile' : IDL.Func(
-      [IDL.Text, IDL.Text, IDL.Nat, IDL.Opt(IDL.Text), ExternalBlob],
+      [IDL.Text, IDL.Text, IDL.Nat, IDL.Opt(IDL.Text), ExternalBlob, IDL.Bool],
       [],
       [],
     ),
   'assignCallerUserRole' : IDL.Func([IDL.Principal, UserRole], [], []),
   'createFolder' : IDL.Func([IDL.Text, IDL.Opt(IDL.Text)], [IDL.Text], []),
+  'deleteApiKey' : IDL.Func([IDL.Text], [IDL.Bool], []),
   'deleteFile' : IDL.Func([IDL.Text], [IDL.Bool], []),
   'deleteFolder' : IDL.Func([IDL.Text], [IDL.Bool], []),
+  'generateApiKey' : IDL.Func([IDL.Text], [IDL.Text], []),
   'getAllFolders' : IDL.Func([], [IDL.Vec(FolderMetadata)], ['query']),
   'getCallerUserProfile' : IDL.Func([], [IDL.Opt(UserProfile)], ['query']),
   'getFile' : IDL.Func([IDL.Text], [IDL.Opt(FileMetadata)], ['query']),
@@ -131,10 +143,48 @@ export const idlService = IDL.Service({
       ['query'],
     ),
   'getUserRole' : IDL.Func([], [UserRole], ['query']),
+  'http_request' : IDL.Func(
+      [
+        IDL.Record({
+          'url' : IDL.Text,
+          'method' : IDL.Text,
+          'body' : IDL.Vec(IDL.Nat8),
+          'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+        }),
+      ],
+      [
+        IDL.Record({
+          'body' : IDL.Vec(IDL.Nat8),
+          'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+          'upgrade' : IDL.Opt(IDL.Bool),
+          'status_code' : IDL.Nat16,
+        }),
+      ],
+      ['query'],
+    ),
+  'http_request_update' : IDL.Func(
+      [
+        IDL.Record({
+          'url' : IDL.Text,
+          'method' : IDL.Text,
+          'body' : IDL.Vec(IDL.Nat8),
+          'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+        }),
+      ],
+      [
+        IDL.Record({
+          'body' : IDL.Vec(IDL.Nat8),
+          'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+          'status_code' : IDL.Nat16,
+        }),
+      ],
+      [],
+    ),
   'initializeAccessControl' : IDL.Func([], [], []),
   'isCallerAdmin' : IDL.Func([], [IDL.Bool], ['query']),
   'isCallerApproved' : IDL.Func([], [IDL.Bool], ['query']),
   'isUsernameUnique' : IDL.Func([IDL.Text], [IDL.Bool], ['query']),
+  'listApiKeys' : IDL.Func([], [IDL.Vec(ApiKey)], ['query']),
   'listApprovals' : IDL.Func([], [IDL.Vec(UserApprovalInfo)], ['query']),
   'moveItem' : IDL.Func([IDL.Text, IDL.Opt(IDL.Text), IDL.Bool], [], []),
   'moveItems' : IDL.Func([IDL.Vec(FileMove)], [], []),
@@ -205,10 +255,20 @@ export const idlFactory = ({ IDL }) => {
     'role' : UserRole,
   });
   const StorageStats = IDL.Record({
+    'totalFiles' : IDL.Nat,
+    'totalFolders' : IDL.Nat,
+    'totalEncryptedFiles' : IDL.Nat,
     'frontendCanisterId' : IDL.Text,
     'appVersion' : IDL.Text,
     'totalStorageBytes' : IDL.Nat,
     'backendCanisterId' : IDL.Text,
+  });
+  const ApiKey = IDL.Record({
+    'id' : IDL.Text,
+    'token' : IDL.Text,
+    'ownerId' : IDL.Principal,
+    'createdAt' : Time,
+    'description' : IDL.Text,
   });
   const ApprovalStatus = IDL.Variant({
     'pending' : IDL.Null,
@@ -257,14 +317,23 @@ export const idlFactory = ({ IDL }) => {
       ),
     '_caffeineStorageUpdateGatewayPrincipals' : IDL.Func([], [], []),
     'addFile' : IDL.Func(
-        [IDL.Text, IDL.Text, IDL.Nat, IDL.Opt(IDL.Text), ExternalBlob],
+        [
+          IDL.Text,
+          IDL.Text,
+          IDL.Nat,
+          IDL.Opt(IDL.Text),
+          ExternalBlob,
+          IDL.Bool,
+        ],
         [],
         [],
       ),
     'assignCallerUserRole' : IDL.Func([IDL.Principal, UserRole], [], []),
     'createFolder' : IDL.Func([IDL.Text, IDL.Opt(IDL.Text)], [IDL.Text], []),
+    'deleteApiKey' : IDL.Func([IDL.Text], [IDL.Bool], []),
     'deleteFile' : IDL.Func([IDL.Text], [IDL.Bool], []),
     'deleteFolder' : IDL.Func([IDL.Text], [IDL.Bool], []),
+    'generateApiKey' : IDL.Func([IDL.Text], [IDL.Text], []),
     'getAllFolders' : IDL.Func([], [IDL.Vec(FolderMetadata)], ['query']),
     'getCallerUserProfile' : IDL.Func([], [IDL.Opt(UserProfile)], ['query']),
     'getFile' : IDL.Func([IDL.Text], [IDL.Opt(FileMetadata)], ['query']),
@@ -283,10 +352,48 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'getUserRole' : IDL.Func([], [UserRole], ['query']),
+    'http_request' : IDL.Func(
+        [
+          IDL.Record({
+            'url' : IDL.Text,
+            'method' : IDL.Text,
+            'body' : IDL.Vec(IDL.Nat8),
+            'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+          }),
+        ],
+        [
+          IDL.Record({
+            'body' : IDL.Vec(IDL.Nat8),
+            'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+            'upgrade' : IDL.Opt(IDL.Bool),
+            'status_code' : IDL.Nat16,
+          }),
+        ],
+        ['query'],
+      ),
+    'http_request_update' : IDL.Func(
+        [
+          IDL.Record({
+            'url' : IDL.Text,
+            'method' : IDL.Text,
+            'body' : IDL.Vec(IDL.Nat8),
+            'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+          }),
+        ],
+        [
+          IDL.Record({
+            'body' : IDL.Vec(IDL.Nat8),
+            'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+            'status_code' : IDL.Nat16,
+          }),
+        ],
+        [],
+      ),
     'initializeAccessControl' : IDL.Func([], [], []),
     'isCallerAdmin' : IDL.Func([], [IDL.Bool], ['query']),
     'isCallerApproved' : IDL.Func([], [IDL.Bool], ['query']),
     'isUsernameUnique' : IDL.Func([IDL.Text], [IDL.Bool], ['query']),
+    'listApiKeys' : IDL.Func([], [IDL.Vec(ApiKey)], ['query']),
     'listApprovals' : IDL.Func([], [IDL.Vec(UserApprovalInfo)], ['query']),
     'moveItem' : IDL.Func([IDL.Text, IDL.Opt(IDL.Text), IDL.Bool], [], []),
     'moveItems' : IDL.Func([IDL.Vec(FileMove)], [], []),

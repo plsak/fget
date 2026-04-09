@@ -35,7 +35,9 @@ import {
   Copy,
   Database,
   Info,
+  Key,
   Loader2,
+  Plus,
   Server,
   Settings,
   Shield,
@@ -43,14 +45,19 @@ import {
   User,
   UserPlus,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { UserRole } from "../backend";
+import { loadConfig } from "../config";
 import { useInternetIdentity } from "../hooks/useInternetIdentity";
 import {
+  type ApiKey,
   useAddMember,
+  useDeleteApiKey,
+  useGenerateApiKey,
   useGetMembers,
   useGetStorageStats,
+  useListApiKeys,
   useRemoveMember,
 } from "../hooks/useQueries";
 import { APP_VERSION } from "../lib/appVersion";
@@ -64,6 +71,23 @@ export function ManagePanel() {
     principal: Principal;
     username: string;
   } | null>(null);
+  const [apiKeyToDelete, setApiKeyToDelete] = useState<ApiKey | null>(null);
+  const [newKeyDescription, setNewKeyDescription] = useState("");
+  const [infoKey, setInfoKey] = useState<ApiKey | null>(null);
+  const [backendCanisterId, setBackendCanisterId] =
+    useState<string>("loading...");
+
+  useEffect(() => {
+    loadConfig()
+      .then((cfg) => {
+        setBackendCanisterId(
+          cfg.backend_canister_id || "YOUR_BACKEND_CANISTER_ID",
+        );
+      })
+      .catch(() => {
+        setBackendCanisterId("YOUR_BACKEND_CANISTER_ID");
+      });
+  }, []);
 
   const {
     data: members,
@@ -71,8 +95,11 @@ export function ManagePanel() {
     refetch: refetchMembers,
   } = useGetMembers();
   const { data: storageStats, isLoading: statsLoading } = useGetStorageStats();
+  const { data: apiKeys, isLoading: apiKeysLoading } = useListApiKeys();
   const addMember = useAddMember();
   const removeMember = useRemoveMember();
+  const generateApiKey = useGenerateApiKey();
+  const deleteApiKey = useDeleteApiKey();
   const { identity, clear } = useInternetIdentity();
   const queryClient = useQueryClient();
 
@@ -142,6 +169,37 @@ export function ManagePanel() {
     }
   };
 
+  const handleDeleteApiKey = async () => {
+    if (!apiKeyToDelete) return;
+    try {
+      await deleteApiKey.mutateAsync(apiKeyToDelete.id);
+      toast.success("API key deleted successfully");
+      setApiKeyToDelete(null);
+    } catch (error) {
+      toast.error("Failed to delete API key", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  };
+
+  const handleGenerateApiKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = newKeyDescription.trim();
+    if (!trimmed) {
+      toast.error("Please enter a description");
+      return;
+    }
+    try {
+      await generateApiKey.mutateAsync(trimmed);
+      toast.success("API key generated successfully");
+      setNewKeyDescription("");
+    } catch (error) {
+      toast.error("Failed to generate API key", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  };
+
   const getShortenedPrincipal = (principal: string) => {
     if (principal.length <= 11) return principal;
     return `${principal.slice(0, 4)}...${principal.slice(-4)}`;
@@ -192,6 +250,26 @@ export function ManagePanel() {
     return null;
   };
 
+  const getMaskedToken = (token: string) => {
+    if (token.length <= 8) return token;
+    return `${token.slice(0, 4)}...${token.slice(-4)}`;
+  };
+
+  const getInfoSnippets = (key: ApiKey) => {
+    const backendId = backendCanisterId;
+    const uploadUrl = `https://${backendId}.icp0.io/upload`;
+    const snippet1 = `curl -X POST ${uploadUrl} \\
+  -H "X-API-Token: ${key.token}" \\
+  -H "X-Filename: myfile.txt" \\
+  --data-binary @myfile.txt`;
+    const snippet2 = `curl -X POST ${uploadUrl} \\
+  -H "X-API-Token: ${key.token}" \\
+  -H "X-Filename: myfile.txt" \\
+  -H "X-Folder: myfolder" \\
+  --data-binary @myfile.txt`;
+    return { snippet1, snippet2 };
+  };
+
   return (
     <>
       <Dialog open={open} onOpenChange={setOpen}>
@@ -227,11 +305,37 @@ export function ManagePanel() {
                     <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
                   </div>
                 ) : storageStats ? (
-                  <div className="flex items-center justify-between p-3 rounded-lg bg-background/60">
-                    <span className="text-sm text-muted-foreground">Used:</span>
-                    <span className="text-lg font-semibold text-blue-500">
-                      {formatStorageSize(storageStats.totalStorageBytes)}
-                    </span>
+                  <div className="space-y-0.5">
+                    <div className="flex items-center justify-between py-1">
+                      <span className="text-sm text-muted-foreground">
+                        Used:
+                      </span>
+                      <span className="text-sm font-semibold text-blue-500">
+                        {formatStorageSize(storageStats.totalStorageBytes)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between py-1">
+                      <span className="text-sm text-muted-foreground">
+                        Folders:
+                      </span>
+                      <span className="text-sm font-semibold text-yellow-500">
+                        {Number(storageStats.totalFolders)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between py-1">
+                      <span className="text-sm text-muted-foreground">
+                        Files/Encrypted:
+                      </span>
+                      <span className="text-sm font-semibold">
+                        <span className="text-blue-500">
+                          {Number(storageStats.totalFiles)}
+                        </span>
+                        <span className="text-muted-foreground">/</span>
+                        <span className="text-red-500">
+                          {Number(storageStats.totalEncryptedFiles)}
+                        </span>
+                      </span>
+                    </div>
                   </div>
                 ) : (
                   <p className="text-sm text-muted-foreground text-center py-4">
@@ -338,6 +442,91 @@ export function ManagePanel() {
               </CardContent>
             </Card>
 
+            {/* Current API Keys */}
+            <Card className="bg-card/50">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <Key className="h-5 w-5 text-yellow-500" />
+                  Current API Keys
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {apiKeysLoading ? (
+                  <div className="flex items-center justify-center py-4">
+                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  </div>
+                ) : apiKeys && apiKeys.length > 0 ? (
+                  <div className="space-y-2">
+                    {apiKeys.map((key) => {
+                      const isCopied = copiedId === key.token;
+                      return (
+                        <div
+                          key={key.id}
+                          className="flex items-center justify-between p-3 rounded-lg bg-background/60"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <p className="font-medium truncate">
+                              {key.description}
+                            </p>
+                            <p className="text-xs text-muted-foreground font-mono">
+                              {getMaskedToken(key.token)}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <Button
+                              onClick={() =>
+                                handleCopyText(key.token, "API token")
+                              }
+                              size="sm"
+                              variant="ghost"
+                              className="gap-1.5"
+                              data-ocid="apikeys.copy.button"
+                            >
+                              {isCopied ? (
+                                <>
+                                  <Check className="h-3.5 w-3.5" />
+                                  <span className="text-xs">Copied</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="h-3.5 w-3.5" />
+                                  <span className="text-xs">Copy</span>
+                                </>
+                              )}
+                            </Button>
+                            <Button
+                              onClick={() => setInfoKey(key)}
+                              size="sm"
+                              variant="ghost"
+                              className="gap-1.5"
+                              data-ocid="apikeys.info.button"
+                            >
+                              <Info className="h-3.5 w-3.5" />
+                              <span className="text-xs">Info</span>
+                            </Button>
+                            <Button
+                              onClick={() => setApiKeyToDelete(key)}
+                              size="sm"
+                              variant="ghost"
+                              className="gap-1.5 text-destructive hover:text-destructive hover:bg-destructive/10"
+                              data-ocid="apikeys.delete_button"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              <span className="text-xs">Delete</span>
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground text-center py-4">
+                    No API keys yet
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+
             {/* Add New Member */}
             <Card className="bg-card/50">
               <CardHeader>
@@ -410,6 +599,49 @@ export function ManagePanel() {
               </CardContent>
             </Card>
 
+            {/* Add New API Key */}
+            <Card className="bg-card/50">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <Plus className="h-5 w-5 text-green-500" />
+                  Add New API Key
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={handleGenerateApiKey} className="space-y-3">
+                  <Input
+                    type="text"
+                    placeholder="e.g. plsak's key"
+                    value={newKeyDescription}
+                    onChange={(e) => setNewKeyDescription(e.target.value)}
+                    disabled={generateApiKey.isPending}
+                    data-ocid="apikeys.input"
+                  />
+                  <Button
+                    type="submit"
+                    disabled={
+                      generateApiKey.isPending || !newKeyDescription.trim()
+                    }
+                    className="w-full gap-2"
+                    size="lg"
+                    data-ocid="apikeys.submit_button"
+                  >
+                    {generateApiKey.isPending ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Generating...
+                      </>
+                    ) : (
+                      <>
+                        <Key className="h-4 w-4" />
+                        Generate
+                      </>
+                    )}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+
             <Separator />
 
             {/* App Version */}
@@ -467,6 +699,126 @@ export function ManagePanel() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Delete API Key Confirmation Dialog */}
+      <AlertDialog
+        open={!!apiKeyToDelete}
+        onOpenChange={(open) => !open && setApiKeyToDelete(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete API Key</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete the API key{" "}
+              <strong>{apiKeyToDelete?.description}</strong>? Any scripts or
+              integrations using this key will stop working immediately.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={deleteApiKey.isPending}
+              data-ocid="apikeys.cancel_button"
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteApiKey}
+              disabled={deleteApiKey.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              data-ocid="apikeys.confirm_button"
+            >
+              {deleteApiKey.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  Deleting...
+                </>
+              ) : (
+                "Delete"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* API Key Info Dialog */}
+      {infoKey && (
+        <Dialog
+          open={!!infoKey}
+          onOpenChange={(open) => !open && setInfoKey(null)}
+        >
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Key className="h-5 w-5 text-yellow-500" />
+                API Key Usage
+              </DialogTitle>
+              <DialogDescription>
+                Use these examples to upload files via curl or wget.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 text-sm">
+              <div>
+                <p className="mb-1 font-medium">Upload a file (&lt; 2 MB):</p>
+                <div className="relative">
+                  <pre className="bg-muted rounded-md p-3 overflow-x-auto text-xs font-mono whitespace-pre">
+                    {getInfoSnippets(infoKey).snippet1}
+                  </pre>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="absolute top-1 right-1 gap-1"
+                    onClick={() =>
+                      handleCopyText(
+                        getInfoSnippets(infoKey).snippet1,
+                        "snippet",
+                      )
+                    }
+                  >
+                    {copiedId === getInfoSnippets(infoKey).snippet1 ? (
+                      <Check className="h-3.5 w-3.5" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                </div>
+              </div>
+              <div>
+                <p className="mb-1 font-medium">Upload to a specific folder:</p>
+                <div className="relative">
+                  <pre className="bg-muted rounded-md p-3 overflow-x-auto text-xs font-mono whitespace-pre">
+                    {getInfoSnippets(infoKey).snippet2}
+                  </pre>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="absolute top-1 right-1 gap-1"
+                    onClick={() =>
+                      handleCopyText(
+                        getInfoSnippets(infoKey).snippet2,
+                        "snippet",
+                      )
+                    }
+                  >
+                    {copiedId === getInfoSnippets(infoKey).snippet2 ? (
+                      <Check className="h-3.5 w-3.5" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                </div>
+              </div>
+              <p className="text-muted-foreground text-xs">
+                <strong>Note:</strong> CLI-uploaded files are stored directly in
+                canister memory, which has limited capacity — avoid uploading
+                large files or large numbers of files via CLI. In-app file
+                encryption is not available for CLI uploads; you can however
+                upload locally encrypted files (e.g. encrypted with gpg) without
+                any restrictions.
+              </p>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }

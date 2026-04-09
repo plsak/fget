@@ -596,6 +596,16 @@ export function FileList({ currentFolderId, onFolderNavigate }: FileListProps) {
 
   const handleFileUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    if (encryptUploads && encryptPassword.trim().length === 0) {
+      // Reset file input so the same file can be re-selected after the user sets a password
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      toast.error(
+        "Encryption password is required. Enter a password or uncheck Encrypt.",
+      );
+      return;
+    }
 
     const fileArray = Array.from(files);
 
@@ -672,6 +682,7 @@ export function FileList({ currentFolderId, onFolderNavigate }: FileListProps) {
           size: BigInt(uploadBytes.length),
           blob,
           parentId: currentFolderId,
+          isEncrypted: encryptUploads && encryptPassword.length > 0,
         });
 
         // Track encrypted file IDs
@@ -748,6 +759,16 @@ export function FileList({ currentFolderId, onFolderNavigate }: FileListProps) {
   ) => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
+    if (encryptUploads && encryptPassword.trim().length === 0) {
+      // Reset folder input so the same folder can be re-selected after the user sets a password
+      if (folderInputRef.current) {
+        folderInputRef.current.value = "";
+      }
+      toast.error(
+        "Encryption password is required. Enter a password or uncheck Encrypt.",
+      );
+      return;
+    }
 
     const fileArray = Array.from(files);
 
@@ -878,6 +899,13 @@ export function FileList({ currentFolderId, onFolderNavigate }: FileListProps) {
     const dataTransfer = e.dataTransfer;
     if (!dataTransfer || !dataTransfer.items || dataTransfer.items.length === 0)
       return;
+
+    if (encryptUploads && encryptPassword.trim().length === 0) {
+      toast.error(
+        "Encryption password is required. Enter a password or uncheck Encrypt.",
+      );
+      return;
+    }
 
     const shouldEncrypt = encryptUploads && encryptPassword.length > 0;
 

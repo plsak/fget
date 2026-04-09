@@ -15,6 +15,13 @@ export interface AdminInfo {
   'username' : string,
   'role' : UserRole,
 }
+export interface ApiKey {
+  'id' : string,
+  'token' : string,
+  'ownerId' : Principal,
+  'createdAt' : Time,
+  'description' : string,
+}
 export type ApprovalStatus = { 'pending' : null } |
   { 'approved' : null } |
   { 'rejected' : null };
@@ -47,6 +54,9 @@ export interface FolderSearchResults {
   'folders' : Array<FolderMetadata>,
 }
 export interface StorageStats {
+  'totalFiles' : bigint,
+  'totalFolders' : bigint,
+  'totalEncryptedFiles' : bigint,
   'frontendCanisterId' : string,
   'appVersion' : string,
   'totalStorageBytes' : bigint,
@@ -89,13 +99,15 @@ export interface _SERVICE {
   >,
   '_caffeineStorageUpdateGatewayPrincipals' : ActorMethod<[], undefined>,
   'addFile' : ActorMethod<
-    [string, string, bigint, [] | [string], ExternalBlob],
+    [string, string, bigint, [] | [string], ExternalBlob, boolean],
     undefined
   >,
   'assignCallerUserRole' : ActorMethod<[Principal, UserRole], undefined>,
   'createFolder' : ActorMethod<[string, [] | [string]], string>,
+  'deleteApiKey' : ActorMethod<[string], boolean>,
   'deleteFile' : ActorMethod<[string], boolean>,
   'deleteFolder' : ActorMethod<[string], boolean>,
+  'generateApiKey' : ActorMethod<[string], string>,
   'getAllFolders' : ActorMethod<[], Array<FolderMetadata>>,
   'getCallerUserProfile' : ActorMethod<[], [] | [UserProfile]>,
   'getFile' : ActorMethod<[string], [] | [FileMetadata]>,
@@ -106,10 +118,42 @@ export interface _SERVICE {
   'getStorageStats' : ActorMethod<[], StorageStats>,
   'getUserProfile' : ActorMethod<[Principal], [] | [UserProfile]>,
   'getUserRole' : ActorMethod<[], UserRole>,
+  'http_request' : ActorMethod<
+    [
+      {
+        'url' : string,
+        'method' : string,
+        'body' : Uint8Array,
+        'headers' : Array<[string, string]>,
+      },
+    ],
+    {
+      'body' : Uint8Array,
+      'headers' : Array<[string, string]>,
+      'upgrade' : [] | [boolean],
+      'status_code' : number,
+    }
+  >,
+  'http_request_update' : ActorMethod<
+    [
+      {
+        'url' : string,
+        'method' : string,
+        'body' : Uint8Array,
+        'headers' : Array<[string, string]>,
+      },
+    ],
+    {
+      'body' : Uint8Array,
+      'headers' : Array<[string, string]>,
+      'status_code' : number,
+    }
+  >,
   'initializeAccessControl' : ActorMethod<[], undefined>,
   'isCallerAdmin' : ActorMethod<[], boolean>,
   'isCallerApproved' : ActorMethod<[], boolean>,
   'isUsernameUnique' : ActorMethod<[string], boolean>,
+  'listApiKeys' : ActorMethod<[], Array<ApiKey>>,
   'listApprovals' : ActorMethod<[], Array<UserApprovalInfo>>,
   'moveItem' : ActorMethod<[string, [] | [string], boolean], undefined>,
   'moveItems' : ActorMethod<[Array<FileMove>], undefined>,
